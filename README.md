@@ -31,7 +31,7 @@ momclaude
 Or clone and run locally:
 
 ```bash
-git clone https://github.com/nicekate/momclaude.git
+git clone https://github.com/KunHcz/momclaude.git
 cd momclaude
 npm install
 npm start
