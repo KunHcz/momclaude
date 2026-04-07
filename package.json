@@ -1,0 +1,41 @@
+{
+  "name": "momclaude",
+  "version": "1.0.0",
+  "description": "Asian mom energy for Claude Code. Slap him with a slipper when he's too slow.",
+  "main": "main.js",
+  "bin": {
+    "momclaude": "bin/momclaude.js"
+  },
+  "scripts": {
+    "start": "electron ."
+  },
+  "files": [
+    "main.js",
+    "preload.js",
+    "overlay.html",
+    "bin/",
+    "icon/",
+    "assets/"
+  ],
+  "keywords": [
+    "claude",
+    "ai",
+    "slipper",
+    "asian-mom",
+    "electron",
+    "fun"
+  ],
+  "author": "hooke",
+  "license": "MIT",
+  "dependencies": {
+    "electron": "^33.0.0",
+    "koffi": "^2.9.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "darwin",
+    "win32"
+  ]
+}

@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; cursor: none; }
+  html, body { overflow: hidden; background: transparent; width: 100%; height: 100%; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ABOUTME: Slipper overlay — a flip-flop that follows the mouse, slaps on fast movement
+// ABOUTME: Click to dismiss. Fast swing triggers slap sound + sends mom message to Claude.
+
+const P = {
+  // Slipper visual
+  slipperW:       70,
+  slipperH:       120,
+
+  // Angle behavior (spring system like goodclaude's wand)
+  defaultAngle:   -Math.PI * 0.35,
+  maxTilt:        Math.PI / 5,
+  trailInfluence: 0.08,
+  springBack:     0.09,
+  angularDamping: 0.78,
+
+  // Slap detection (like goodclaude's wave detection)
+  slapThreshold:  22,
+  slapCooldownMs: 800,
+  firstSlapGraceMs: 400,
+
+  // Particles
+  maxParticles:   200,
+
+  // Misc
+  bgAlpha:        0.011,
+  fadeSpeed:       0.045,
+};
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+let mouseX = 0, mouseY = 0;
+let prevMouseX = 0, prevMouseY = 0;
+let active = false;
+let dropping = false;
+let dropOpacity = 1;
+let slipperAngle = P.defaultAngle;
+let slipperAngVel = 0;
+let spawnTime = 0;
+let lastSlapTime = 0;
+let smoothSpeed = 0;
+
+// Click to dismiss (same as badclaude/goodclaude)
+document.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+document.addEventListener('mousedown', () => {
+  if (active && !dropping) dropping = true;
+});
+
+// ── Particles ──────────────────────────────────────────────────────────────
+let particles = [];
+
+function spawnSlapParticles(x, y) {
+  // Shockwave ring
+  const ringCount = 16;
+  for (let i = 0; i < ringCount; i++) {
+    if (particles.length >= P.maxParticles) break;
+    const angle = (i / ringCount) * Math.PI * 2;
+    const speed = 5 + Math.random() * 6;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 1.0,
+      decay: 0.02 + Math.random() * 0.015,
+      size: 3 + Math.random() * 4,
+      type: 'ring',
+    });
+  }
+  // Angry sparks
+  for (let i = 0; i < 12; i++) {
+    if (particles.length >= P.maxParticles) break;
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 2 + Math.random() * 7;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 3,
+      life: 1.0,
+      decay: 0.015 + Math.random() * 0.02,
+      size: 2 + Math.random() * 4,
+      type: 'spark',
+    });
+  }
+}
+
+function spawnTrailParticle(x, y) {
+  if (particles.length >= P.maxParticles) return;
+  particles.push({
+    x: x + (Math.random() - 0.5) * 20,
+    y: y + (Math.random() - 0.5) * 20,
+    vx: (Math.random() - 0.5) * 1.5,
+    vy: (Math.random() - 0.5) * 1.5 - 0.5,
+    life: 1.0,
+    decay: 0.03 + Math.random() * 0.04,
+    size: 1.5 + Math.random() * 2,
+    type: 'trail',
+  });
+}
+
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.type === 'spark') p.vy += 0.12;
+    p.vx *= 0.97;
+    p.vy *= 0.97;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const alpha = p.life * p.life;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    if (p.type === 'ring') {
+      ctx.strokeStyle = `rgba(255, ${Math.floor(80 * p.life)}, ${Math.floor(30 * p.life)}, 1)`;
+      ctx.lineWidth = 2.5 * p.life;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * (1 + (1 - p.life) * 2), 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (p.type === 'spark') {
+      const r = 255;
+      const g = Math.floor(60 + 140 * p.life);
+      const b = Math.floor(30 * p.life);
+      ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+      ctx.shadowColor = 'rgb(255, 100, 50)';
+      ctx.shadowBlur = 8 * p.life;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // trail: soft red glow
+      ctx.fillStyle = `rgba(232, 64, 87, ${alpha * 0.6})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+// ── Sound: synthesized slap ────────────────────────────────────────────────
+function playSlapSound() {
+  try {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Impact: short burst of noise
+    const bufferSize = ac.sampleRate * 0.08;
+    const noiseBuffer = ac.createBuffer(1, bufferSize, ac.sampleRate);
+    const data = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 3);
+    }
+    const noise = ac.createBufferSource();
+    noise.buffer = noiseBuffer;
+
+    const filter = ac.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 900;
+    filter.Q.value = 1.2;
+
+    const noiseGain = ac.createGain();
+    noiseGain.gain.setValueAtTime(0.5, ac.currentTime);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.12);
+
+    noise.connect(filter);
+    filter.connect(noiseGain);
+    noiseGain.connect(ac.destination);
+    noise.start();
+
+    // Low thump
+    const osc = ac.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(150, ac.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(40, ac.currentTime + 0.1);
+    const oscGain = ac.createGain();
+    oscGain.gain.setValueAtTime(0.35, ac.currentTime);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.15);
+    osc.connect(oscGain);
+    oscGain.connect(ac.destination);
+    osc.start();
+    osc.stop(ac.currentTime + 0.2);
+  } catch (e) {}
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+const lerp = (a, b, t) => a + (b - a) * t;
+const wrapPi = a => {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+};
+
+// ── Draw slipper ───────────────────────────────────────────────────────────
+function drawSlipper(cx, cy, angle, opacity) {
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.translate(cx, cy);
+  ctx.rotate(angle);
+
+  const w = P.slipperW;
+  const h = P.slipperH;
+
+  // Shadow
+  ctx.save();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+  ctx.shadowBlur = 12;
+  ctx.shadowOffsetX = 3;
+  ctx.shadowOffsetY = 5;
+
+  // Sole (rounded flip-flop shape)
+  ctx.fillStyle = '#E84057';
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, h * 0.1);
+  ctx.quadraticCurveTo(-w / 2, -h * 0.45, -w * 0.15, -h * 0.5);
+  ctx.quadraticCurveTo(0, -h * 0.53, w * 0.15, -h * 0.5);
+  ctx.quadraticCurveTo(w / 2, -h * 0.45, w / 2, h * 0.1);
+  ctx.quadraticCurveTo(w / 2, h * 0.5, 0, h * 0.52);
+  ctx.quadraticCurveTo(-w / 2, h * 0.5, -w / 2, h * 0.1);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  // Sole outline
+  ctx.strokeStyle = '#C43048';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, h * 0.1);
+  ctx.quadraticCurveTo(-w / 2, -h * 0.45, -w * 0.15, -h * 0.5);
+  ctx.quadraticCurveTo(0, -h * 0.53, w * 0.15, -h * 0.5);
+  ctx.quadraticCurveTo(w / 2, -h * 0.45, w / 2, h * 0.1);
+  ctx.quadraticCurveTo(w / 2, h * 0.5, 0, h * 0.52);
+  ctx.quadraticCurveTo(-w / 2, h * 0.5, -w / 2, h * 0.1);
+  ctx.closePath();
+  ctx.stroke();
+
+  // Cross-hatch texture
+  ctx.save();
+  ctx.clip(); // clip to sole shape
+  ctx.strokeStyle = 'rgba(160, 30, 50, 0.25)';
+  ctx.lineWidth = 1;
+  for (let i = -5; i <= 5; i++) {
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.45, i * h * 0.075);
+    ctx.lineTo(w * 0.45, i * h * 0.075);
+    ctx.stroke();
+  }
+  for (let i = -3; i <= 3; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * w * 0.15, -h * 0.45);
+    ctx.lineTo(i * w * 0.15, h * 0.45);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // V-strap
+  ctx.strokeStyle = '#D42040';
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-w * 0.3, h * 0.15);
+  ctx.quadraticCurveTo(-w * 0.1, -h * 0.05, 0, -h * 0.2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(w * 0.3, h * 0.15);
+  ctx.quadraticCurveTo(w * 0.1, -h * 0.05, 0, -h * 0.2);
+  ctx.stroke();
+
+  // Strap junction
+  ctx.fillStyle = '#FF6070';
+  ctx.beginPath();
+  ctx.arc(0, -h * 0.2, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// ── Update ─────────────────────────────────────────────────────────────────
+function update() {
+  updateParticles();
+  if (!active) return;
+
+  const mvx = mouseX - prevMouseX;
+  const mvy = mouseY - prevMouseY;
+  const speed = Math.hypot(mvx, mvy);
+
+  if (!dropping) {
+    // Angle: trails behind mouse movement with spring return
+    if (speed > 1.5) {
+      const moveAngle = Math.atan2(-mvy, -mvx);
+      const diff = wrapPi(moveAngle - slipperAngle);
+      slipperAngVel += diff * P.trailInfluence;
+    }
+    const defaultDiff = wrapPi(P.defaultAngle - slipperAngle);
+    slipperAngVel += defaultDiff * P.springBack;
+    slipperAngVel *= P.angularDamping;
+    slipperAngle = wrapPi(slipperAngle + slipperAngVel);
+
+    // Clamp tilt
+    const minA = P.defaultAngle - P.maxTilt;
+    const maxA = P.defaultAngle + P.maxTilt;
+    if (slipperAngle < minA) { slipperAngle = minA; slipperAngVel = 0; }
+    if (slipperAngle > maxA) { slipperAngle = maxA; slipperAngVel = 0; }
+
+    // Trail particles when moving
+    if (speed > 5) {
+      const tipX = mouseX + Math.sin(slipperAngle) * P.slipperH * 0.4;
+      const tipY = mouseY + Math.cos(slipperAngle) * P.slipperH * 0.4;
+      spawnTrailParticle(tipX, tipY);
+    }
+
+    // Slap detection: sustained fast movement (like goodclaude's wave)
+    smoothSpeed = smoothSpeed * 0.75 + speed * 0.25;
+    const now = Date.now();
+    if (smoothSpeed > P.slapThreshold &&
+        now - spawnTime >= P.firstSlapGraceMs &&
+        now - lastSlapTime > P.slapCooldownMs) {
+      lastSlapTime = now;
+      playSlapSound();
+      spawnSlapParticles(mouseX, mouseY);
+      window.bridge.slipperSlap();
+    }
+  } else {
+    // Dropping: fade out
+    dropOpacity -= P.fadeSpeed;
+    if (dropOpacity <= 0 && particles.length === 0) {
+      active = false;
+      dropping = false;
+      window.bridge.hideOverlay();
+    }
+  }
+
+  prevMouseX = mouseX;
+  prevMouseY = mouseY;
+}
+
+// ── Rendering ──────────────────────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = `rgba(0,0,0,${P.bgAlpha})`;
+  ctx.fillRect(0, 0, W, H);
+
+  drawParticles();
+
+  if (!active) return;
+
+  const opacity = dropping ? Math.max(dropOpacity, 0) : 1;
+  if (opacity <= 0) return;
+
+  drawSlipper(mouseX, mouseY, slipperAngle, opacity);
+}
+
+// ── Main loop ──────────────────────────────────────────────────────────────
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+
+// ── IPC from main process ──────────────────────────────────────────────────
+window.bridge.onSpawnSlipper(() => {
+  active = true;
+  dropping = false;
+  dropOpacity = 1;
+  slipperAngle = P.defaultAngle;
+  slipperAngVel = 0;
+  smoothSpeed = 0;
+  spawnTime = Date.now();
+  lastSlapTime = 0;
+  prevMouseX = mouseX;
+  prevMouseY = mouseY;
+});
+
+window.bridge.onDropSlipper(() => {
+  if (active && !dropping) dropping = true;
+});
+
+</script>
+</body>
+</html>
